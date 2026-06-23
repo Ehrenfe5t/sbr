@@ -169,12 +169,113 @@ static GeometricPathSet PostProcess(const GeometricPathSet& raw, const SbrConfig
 }
 
 // ═══════════════════════════════════════════════════════════
-// RunPointToPoint (栈式 DFS, 确定性 R/T 分裂)
+// 独立绕射寻径 (解耦, 不混合 R/T)
+// 参考 RT.XD SolveOneTimeDiffractionPathByEquation 的设计思路
+// 对每个 Tx 和每个 Rx, 查询所有楔边, 使用 Fermat 原理找到绕射点
+// ═══════════════════════════════════════════════════════════
+
+static GeometricPathSet RunDiffraction(
+    const Scene& scene, const MaterialDatabase& matDb, const SbrConfig& config,
+    const Point3& txPoint, const std::vector<Point3>& rxPoints,
+    ISceneAccelerator* accel) {
+    GeometricPathSet result;
+    if (config.max_diffraction_count <= 0) return result;
+    if (scene.wedges.empty()) return result;
+    if (!accel) return result;
+
+    const int nSamples = std::max(4, config.diffraction_rays_per_event);
+
+    for (const auto& wedge : scene.wedges) {
+        if (!wedge.diffractable) continue;
+
+        // 楔边方向
+        Vec3 e = wedge.direction;
+        Point3 A = wedge.segment_start;
+        Point3 B = wedge.segment_end;
+        double L = wedge.length;
+        if (L < 1e-6) continue;
+
+        for (const auto& rx : rxPoints) {
+            // ── Fermat 原理: 在边上采样找最短路径点 ──
+            double bestT = 0.5, bestLen = 1e308;
+            // 粗采样
+            for (int i = 0; i <= nSamples; ++i) {
+                double t = (double)i / nSamples;
+                Point3 P = Add(A, Scale(SubtractVec(B, A), t));
+                double s1 = Length(SubtractVec(P, txPoint));
+                double s2 = Length(SubtractVec(rx, P));
+                double total = s1 + s2;
+                if (total < bestLen) { bestLen = total; bestT = t; }
+            }
+            // 局部精化 (二分)
+            for (int refine = 0; refine < 4; ++refine) {
+                double dt = 0.5 / nSamples / (1 << refine);
+                for (int sign = -1; sign <= 1; sign += 2) {
+                    double t = bestT + sign * dt;
+                    if (t < 0.0 || t > 1.0) continue;
+                    Point3 P = Add(A, Scale(SubtractVec(B, A), t));
+                    double s1 = Length(SubtractVec(P, txPoint));
+                    double s2 = Length(SubtractVec(rx, P));
+                    double total = s1 + s2;
+                    if (total < bestLen) { bestLen = total; bestT = t; }
+                }
+            }
+
+            Point3 diffPt = Add(A, Scale(SubtractVec(B, A), bestT));
+            double s1 = Length(SubtractVec(diffPt, txPoint));
+            double s2 = Length(SubtractVec(rx, diffPt));
+            if (s1 < 0.01 || s2 < 0.01) continue;  // too close
+
+            // ── 可见性验证 ──
+            VisibilityQueryContext vqc;
+            vqc.ignored_face_id  = wedge.positive_face_id;
+            vqc.ignored_face_id2 = wedge.negative_face_id;
+            vqc.origin_offset_distance = 1e-3;
+            vqc.target_shrink_distance  = 1e-3;
+
+            bool visTx = accel->IsVisible(txPoint, diffPt, vqc);
+            bool visRx = accel->IsVisible(diffPt, rx, vqc);
+            if (!visTx || !visRx) continue;
+
+            // ── 记录路径 Tx → Diff → Rx ──
+            GeometricPath gp;
+            gp.is_los = false;
+
+            PathNode txNode; txNode.interaction_type = InteractionType::Tx;
+            txNode.point = txPoint;
+            txNode.segment_length_from_previous = 0; txNode.valid = true;
+            gp.nodes.push_back(txNode);
+
+            PathNode diffNode; diffNode.interaction_type = InteractionType::Diffraction;
+            diffNode.point = diffPt; diffNode.wedge_id = wedge.wedge_id;
+            diffNode.surface_normal = wedge.direction;
+            diffNode.segment_length_from_previous = s1;
+            diffNode.diffraction_diag.s1 = s1;
+            diffNode.diffraction_diag.s2 = s2;
+            diffNode.valid = true;
+            gp.nodes.push_back(diffNode);
+
+            PathNode rxNode; rxNode.interaction_type = InteractionType::Rx;
+            rxNode.point = rx;
+            rxNode.segment_length_from_previous = s2; rxNode.valid = true;
+            gp.nodes.push_back(rxNode);
+
+            gp.total_length = s1 + s2;
+            gp.valid = true;
+            result.paths.push_back(gp);
+        }
+    }
+
+    return result;
+}
+
+// ═══════════════════════════════════════════════════════════
+// RunPointToPoint (栈式 DFS, 确定性 R/T 分裂, 绕射已解耦)
 // ═══════════════════════════════════════════════════════════
 
 struct TraceState {
     Point3 curPt; Vec3 curDir; double curPwr;
-    int cr, ct, cd, depth, lastFaceId, currentMediumId;
+    int cr, ct, depth, lastFaceId, currentMediumId;
     std::vector<PathNode> nodes;
     double cumulativeLength;
 };
@@ -218,12 +319,6 @@ GeometricPathSet SbrEngine::RunPointToPoint(
     const double rMin = std::max(baseRadius, config.ray_tube_min_radius_m);
     const double rMax = (config.ray_tube_max_radius_m > 0.0) ? config.ray_tube_max_radius_m : 1e6;
 
-    // 绕射参数
-    const int maxDiff = config.max_diffraction_count;
-    const int diffRays = config.diffraction_rays_per_event;
-    const double edgeEps = 0.02;
-    const double diffPowerFactor = 0.08;
-
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1)
 #endif
@@ -238,7 +333,6 @@ GeometricPathSet SbrEngine::RunPointToPoint(
         TraceState root;
         root.curPt = txPoint; root.curDir = dir; root.curPwr = 1.0;
         root.cr = config.max_reflection_count; root.ct = config.max_transmission_count;
-        root.cd = config.max_diffraction_count;
         root.depth = 0; root.lastFaceId = -1; root.currentMediumId = 0;
         root.cumulativeLength = 0.0;
         PathNode txNode; txNode.interaction_type = InteractionType::Tx;
@@ -315,7 +409,7 @@ GeometricPathSet SbrEngine::RunPointToPoint(
             if (face.reflection_enabled && ts.cr > 0) {
                 TraceState rs;
                 rs.curPt = hit.position; rs.curDir = Reflect(ts.curDir, hit.normal);
-                rs.curPwr = ts.curPwr; rs.cr = ts.cr - 1; rs.ct = ts.ct; rs.cd = ts.cd;
+                rs.curPwr = ts.curPwr; rs.cr = ts.cr - 1; rs.ct = ts.ct;
                 rs.depth = ts.depth + 1; rs.lastFaceId = hit.face_id;
                 rs.currentMediumId = ts.currentMediumId;
                 rs.cumulativeLength = ts.cumulativeLength + hit.distance;
@@ -352,7 +446,7 @@ GeometricPathSet SbrEngine::RunPointToPoint(
                     TraceState ts_tx;
                     ts_tx.curPt = hit.position; ts_tx.curDir = sr.direction;
                     ts_tx.curPwr = ts.curPwr * (1.0 - R);
-                    ts_tx.cr = ts.cr; ts_tx.ct = ts.ct - 1; ts_tx.cd = ts.cd;
+                    ts_tx.cr = ts.cr; ts_tx.ct = ts.ct - 1;
                     ts_tx.depth = ts.depth + 1; ts_tx.lastFaceId = hit.face_id;
                     ts_tx.currentMediumId = newMediumId;
                     ts_tx.cumulativeLength = ts.cumulativeLength + hit.distance;
@@ -376,38 +470,7 @@ GeometricPathSet SbrEngine::RunPointToPoint(
                 }
             }
 
-            // ── 4c. 绕射 ──
-            if (maxDiff > 0 && ts.cd > 0 && face.reflection_enabled && !scene.wedges.empty()) {
-                int edgeId = DetectEdgeHit(hit.position, face, scene, edgeEps);
-                if (edgeId >= 0) {
-                    int wedgeIdx = FindWedgeByEdgeId(scene, edgeId);
-                    if (wedgeIdx >= 0) {
-                        const Wedge& wedge = scene.wedges[wedgeIdx];
-                        auto kellerDirs = GenerateKellerConeDirections(
-                            ts.curDir, wedge.direction, diffRays);
-                        for (const auto& kd : kellerDirs) {
-                            TraceState ds;
-                            ds.curPt = hit.position; ds.curDir = kd;
-                            ds.curPwr = ts.curPwr * diffPowerFactor;
-                            ds.cr = ts.cr; ds.ct = ts.ct; ds.cd = ts.cd - 1;
-                            ds.depth = ts.depth + 1; ds.lastFaceId = -1;
-                            ds.currentMediumId = ts.currentMediumId;
-                            ds.cumulativeLength = ts.cumulativeLength + hit.distance;
-                            ds.nodes = ts.nodes;
-                            PathNode dn; dn.interaction_type = InteractionType::Diffraction;
-                            dn.point = hit.position; dn.wedge_id = wedge.wedge_id;
-                            dn.surface_normal = wedge.direction;
-                            dn.incident_direction = ts.curDir; dn.direction = kd;
-                            dn.segment_length_from_previous = hit.distance;
-                            dn.diffraction_diag.keller_residual =
-                                std::fabs(Dot(ts.curDir, wedge.direction) - Dot(kd, wedge.direction));
-                            dn.diffraction_diag.s1 = hit.distance; dn.valid = true;
-                            ds.nodes.push_back(dn);
-                            stack.push_back(std::move(ds));
-                        }
-                    }
-                }
-            }
+            // ── 4c. 绕射: 已解耦, 由 RunDiffraction 独立处理 (不再混合 R/T) ──
         }
     }
 
@@ -431,8 +494,28 @@ SbrCoverageResult SbrEngine::RunCoverage(
     SbrCoverageResult covResult;
     covResult.trace_profile = config.trace_profile;
     covResult.total_rays = config.ray_count;
+
+    // ── 独立绕射寻径 (每Tx-Rx对) ──
+    GeometricPathSet diffPaths = RunDiffraction(scene, matDb, config, txPoint, rxGrid, accelerator_.get());
+    if (config.max_diffraction_count > 0)
+        std::printf("[Diff] Generated %zu diffraction paths\n", diffPaths.paths.size());
+
     for (size_t i = 0; i < rxGrid.size(); ++i) {
         auto paths = RunPointToPoint(scene, matDb, config, txPoint, {rxGrid[i]}, tol);
+
+        // 合并绕射路径 (匹配当前Rx)
+        for (auto& dp : diffPaths.paths) {
+            if (dp.nodes.size() >= 3) {
+                auto& rxNode = dp.nodes.back();
+                double dx = rxNode.point.x - rxGrid[i].x;
+                double dy = rxNode.point.y - rxGrid[i].y;
+                double dz = rxNode.point.z - rxGrid[i].z;
+                if (dx*dx + dy*dy + dz*dz < 1e-6) {
+                    paths.paths.push_back(dp);
+                }
+            }
+        }
+
         RxCoverageRecord rec; rec.rx_position = rxGrid[i]; rec.rx_index = (int)i;
         rec.ray_hit_count = (int)paths.paths.size();
         double tp = 0.0;

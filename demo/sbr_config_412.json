@@ -1,7 +1,7 @@
 {
   "scene": {
-    "obj_file": "demo/Scene/meeting.obj",
-    "material_map_file": "demo/Material/material_map-meeting.json",
+    "obj_file": "demo/Scene/412-6k.obj",
+    "material_map_file": "demo/Material/material_map-412.json",
     "material_csv_file": "demo/Material/ItuMaterial.csv"
   },
 
@@ -35,17 +35,17 @@
     "store_paths": true
   },
 
-  "tx": { "x": 10.0, "y": 1.5, "z": -10.0 },
+  "tx": { "x": 2.38, "y": 1.5, "z": -9.61 },
 
   "rx_mode": "list",
   "rx_list": [
-    { "id": "rx01", "x": 5.0, "y": 1.5, "z": -10.0 },
-    { "id": "rx02", "x": 10.0, "y": 1.5, "z": -6.0 },
-    { "id": "rx03", "x": 15.0, "y": 1.5, "z": -15.0 }
+    { "id": "rx01", "x": 1.58, "y": 1.5, "z": -8.81 },
+    { "id": "rx02", "x": 1.58, "y": 1.5, "z": -2.81 },
+    { "id": "rx03", "x": 4.78, "y": 1.5, "z": -5.61 }
   ],
 
   "output": {
-    "result_json": "output/sbr_result.json",
-    "result_csv": "output/sbr_paths.csv"
+    "result_json": "output/412/sbr_result.json",
+    "result_csv": "output/412/sbr_paths.csv"
   }
 }

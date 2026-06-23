@@ -1,0 +1,77 @@
+{
+  "default_medium": "Vacuum",
+  "objects": [
+    {
+      "rule_name": "floor_rule",
+      "object_name": "Wood",
+      "object_type": "floor",
+      "surface_material_name": "Wood",
+      "front_material_name": "Vacuum",
+      "back_material_name": "Wood",
+      "normal_rule": "front_is_air",
+      "reflection_enabled": true,
+      "transmission_enabled": true,
+      "diffraction_candidate_enabled": true
+    },
+    {
+      "rule_name": "ceiling_rule",
+      "object_name": "Glass",
+      "object_type": "ceiling",
+      "surface_material_name": "Glass",
+      "front_material_name": "Vacuum",
+      "back_material_name": "Glass",
+      "normal_rule": "front_is_air",
+      "reflection_enabled": true,
+      "transmission_enabled": true,
+      "diffraction_candidate_enabled": true
+    },
+    {
+      "rule_name": "table_rule",
+      "object_name": "Concrete",
+      "object_type": "table",
+      "surface_material_name": "Concrete",
+      "front_material_name": "Vacuum",
+      "back_material_name": "Concrete",
+      "normal_rule": "front_is_air",
+      "reflection_enabled": true,
+      "transmission_enabled": true,
+      "diffraction_candidate_enabled": true
+    },
+    {
+      "rule_name": "wall_main_rule",
+      "object_name": "Metal",
+      "object_type": "wall",
+      "surface_material_name": "Metal",
+      "front_material_name": "Vacuum",
+      "back_material_name": "Metal",
+      "normal_rule": "front_is_air",
+      "reflection_enabled": true,
+      "transmission_enabled": true,
+      "diffraction_candidate_enabled": true
+    },
+    {
+      "rule_name": "wall_aux_rule",
+      "object_name": "Marble",
+      "object_type": "wall",
+      "surface_material_name": "Marble",
+      "front_material_name": "Vacuum",
+      "back_material_name": "Marble",
+      "normal_rule": "front_is_air",
+      "reflection_enabled": true,
+      "transmission_enabled": true,
+      "diffraction_candidate_enabled": true
+    },
+    {
+      "rule_name": "door_rule",
+      "object_name": "Chipboard",
+      "object_type": "door",
+      "surface_material_name": "Chipboard",
+      "front_material_name": "Vacuum",
+      "back_material_name": "Chipboard",
+      "normal_rule": "front_is_air",
+      "reflection_enabled": true,
+      "transmission_enabled": true,
+      "diffraction_candidate_enabled": true
+    }
+  ]
+}

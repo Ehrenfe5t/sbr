@@ -63,6 +63,8 @@ if HAS_GUI:
             self.scene_file = ""
             self._camera_pos = None       # ★ 保存视角
             self._first_render = True     # ★ 首次渲染标志
+            self._seq_filter = ""          # ★ 按交互序列类型筛选
+            self._seq_paths = []           # ★ 当前序列类型下的路径索引列表
 
             # Colors for paths
             self.PATH_COLORS = [
@@ -125,6 +127,16 @@ if HAS_GUI:
             self.path_total = QLabel("0")
             pl.addWidget(self.path_total)
             ctrl_layout.addWidget(path_grp)
+
+            # Sequence type filter
+            seq_grp = QGroupBox("Sequence Filter")
+            sl = QHBoxLayout(seq_grp)
+            sl.addWidget(QLabel("Type:"))
+            self.seq_combo = QComboBox()
+            self.seq_combo.setMinimumWidth(120)
+            self.seq_combo.currentIndexChanged.connect(self._on_seq_change)
+            sl.addWidget(self.seq_combo)
+            ctrl_layout.addWidget(seq_grp)
 
             # Display toggles
             disp_grp = QGroupBox("Display")
@@ -227,7 +239,7 @@ if HAS_GUI:
                 self.current_path = 0
                 self._first_render = True     # ★ 新文件重置视角
                 self._camera_pos = None
-                self._on_rx_change(0)
+                self._on_rx_change(0)          # 填充 seq combo + path spin
                 self._update_render()
 
             except Exception as e:
@@ -249,11 +261,44 @@ if HAS_GUI:
             self.current_rx = idx
             records = self.result_data.get('rx_records', [])
             if idx < len(records):
-                n = len(records[idx].get('paths', []))
-                self.path_spin.setMaximum(max(0, n - 1))
-                self.path_total.setText(str(n))
-                self.path_spin.setValue(0)
+                paths = records[idx].get('paths', [])
+                # ── 按序列类型分组 ──
+                seq_map = {}
+                for pi, p in enumerate(paths):
+                    sq = p.get('sequence', '?')
+                    seq_map.setdefault(sq, []).append(pi)
+                sorted_seqs = sorted(seq_map.keys(),
+                    key=lambda s: (-len(s), s))  # complex first
+                # Populate seq combo
+                self.seq_combo.blockSignals(True)
+                self.seq_combo.clear()
+                self.seq_combo.addItem(f"(all) [{len(paths)}]", "")
+                for sq in sorted_seqs:
+                    self.seq_combo.addItem(f"{sq} [{len(seq_map[sq])}]", sq)
+                self.seq_combo.blockSignals(False)
+                self._apply_seq_filter(paths)
+
+        def _on_seq_change(self, _idx):
+            if not self.result_data: return
+            records = self.result_data.get('rx_records', [])
+            if self.current_rx < len(records):
+                self._apply_seq_filter(records[self.current_rx].get('paths', []))
             self._update_render()
+
+        def _apply_seq_filter(self, paths):
+            sq = self.seq_combo.currentData()
+            if sq:
+                self._seq_filter = sq
+                self._seq_paths = [pi for pi, p in enumerate(paths) if p.get('sequence','') == sq]
+            else:
+                self._seq_filter = ""
+                self._seq_paths = list(range(len(paths)))
+            self.current_path = 0
+            self.path_spin.blockSignals(True)
+            self.path_spin.setMaximum(max(0, len(self._seq_paths) - 1))
+            self.path_spin.setValue(0)
+            self.path_total.setText(str(len(self._seq_paths)))
+            self.path_spin.blockSignals(False)
 
         def _on_path_change(self, val):
             self.current_path = val
@@ -299,23 +344,18 @@ if HAS_GUI:
                     color='lime', point_size=30, render_points_as_spheres=True)
 
             # ── Paths ──
-            if self.chk_all_paths.isChecked():
-                # ★ 显示所选 Rx 的全部路径
-                if self.current_rx < len(records):
-                    paths = records[self.current_rx].get('paths', [])
-                    for pi, p in enumerate(paths):
-                        if pi >= self.max_paths_all: break
-                        self._draw_path(p, pi, highlight=(pi == self.current_path))
-            else:
-                # 仅显示当前路径 + 其他路径暗显
-                if self.current_rx < len(records):
-                    paths = records[self.current_rx].get('paths', [])
-                    if self.current_path < len(paths):
-                        self._draw_path(paths[self.current_path], self.current_path, highlight=True)
-                    for pi, p in enumerate(paths):
-                        if pi == self.current_path: continue
-                        if pi >= 10: break
-                        self._draw_path(p, pi, highlight=False)
+            if self.current_rx < len(records):
+                paths = records[self.current_rx].get('paths', [])
+                if self.chk_all_paths.isChecked():
+                    # 显示所选序列类型的所有路径 (最多 max_paths_all)
+                    for i, pi in enumerate(self._seq_paths):
+                        if i >= self.max_paths_all: break
+                        self._draw_path(paths[pi], pi, highlight=(i == self.current_path))
+                else:
+                    # ★ 仅显示当前所选路径 (别无其他)
+                    if self.current_path < len(self._seq_paths):
+                        pi = self._seq_paths[self.current_path]
+                        self._draw_path(paths[pi], pi, highlight=True)
 
             self.plotter.show_grid(color='gray', font_size=8)
 
@@ -329,10 +369,11 @@ if HAS_GUI:
             # Update path info
             if self.current_rx < len(records):
                 paths = records[self.current_rx].get('paths', [])
-                if self.current_path < len(paths):
-                    p = paths[self.current_path]
+                if self.current_path < len(self._seq_paths):
+                    pi = self._seq_paths[self.current_path]
+                    p = paths[pi]
                     self.info_text.setPlainText(
-                        f"Rx[{self.current_rx}] Path #{self.current_path}\n"
+                        f"Rx[{self.current_rx}] Path #{pi} (filtered #{self.current_path})\n"
                         f"Length: {p.get('len',0):.3f}m\n"
                         f"Nodes: {p.get('nodes',0)}\n"
                         f"LoS: {p.get('los',False)}\n"
