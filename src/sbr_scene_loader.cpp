@@ -247,6 +247,10 @@ struct EdgeKey {
 struct EdgeKeyHash { size_t operator()(const EdgeKey& k) const { return (size_t)k.v0*104729 + k.v1; } };
 
 void BuildEdgeWedgeTopology(Scene& scene, double wedgeAngleMinDeg) {
+    // UTD 阶段1: 基本楔边条件
+    // 1. 两相邻面元共享边  2. 二面角(法线夹角) ∈ [3°, 177°]
+    // 文献: Keller 1962; Kouyoumjian & Pathak 1974
+    const double kDihedralMin = 3.0, kDihedralMax = 177.0;
     scene.edges.clear(); scene.wedges.clear();
 
     // 1. 收集共享边: 无向边 → 相邻面列表
@@ -281,8 +285,9 @@ void BuildEdgeWedgeTopology(Scene& scene, double wedgeAngleMinDeg) {
             const Vec3& n1 = scene.faces[adjFaces[1]].normal;
             double dotN = Clamp(Dot(n0, n1), -1.0, 1.0);
             e.dihedral_angle_deg = std::acos(dotN) * 180.0 / kPi;
-            e.supports_wedge = (e.dihedral_angle_deg >= wedgeAngleMinDeg &&
-                                e.dihedral_angle_deg <= 180.0 - wedgeAngleMinDeg);
+            // supports_wedge: 排除共面边 (接近0°或180°) 和过于尖锐的边
+            e.supports_wedge = (e.dihedral_angle_deg >= kDihedralMin &&
+                                e.dihedral_angle_deg <= kDihedralMax);
         }
 
         keyToEdgeId[key] = e.edge_id;
@@ -303,9 +308,16 @@ void BuildEdgeWedgeTopology(Scene& scene, double wedgeAngleMinDeg) {
         }
     }
 
-    // 4. 为支持楔边的边创建 Wedge
+    // 4. 为支持楔边的边创建 Wedge (UTD 外角 = 360° - 二面角)
     for (const auto& e : scene.edges) {
         if (!e.supports_wedge) continue;
+
+        // UTD楔边候选: 两面共享边 + 法线夹角∈[3°,177°]
+        // 大侧 = 360°-dihedral, 小侧 = dihedral
+        // 阶段1不判断Tx/Rx位置, 全部标记为候选
+        double exteriorAngle = 360.0 - e.dihedral_angle_deg;  // 大侧
+        bool isCandidate = (e.dihedral_angle_deg >= kDihedralMin && e.dihedral_angle_deg <= kDihedralMax);
+
         Wedge w;
         w.wedge_id = static_cast<int>(scene.wedges.size());
         w.source_edge_id = e.edge_id;
@@ -313,8 +325,12 @@ void BuildEdgeWedgeTopology(Scene& scene, double wedgeAngleMinDeg) {
         w.negative_face_id = e.face_id1;
         w.segment_start = e.start; w.segment_end = e.end;
         w.center_point = e.midpoint; w.direction = e.direction;
-        w.length = e.length; w.wedge_angle_deg = e.dihedral_angle_deg;
-        w.diffractable = true; w.valid_for_utd = true;
+        w.length = e.length;
+        w.wedge_angle_deg = exteriorAngle;           // 大侧(自由空间侧)
+        w.dihedral_angle_deg = e.dihedral_angle_deg; // 小侧(法线指向侧)
+        w.diffractable = isCandidate;
+        w.valid_for_utd = isCandidate;
+        w.convexity = (exteriorAngle > 180.0) ? WedgeConvexity::Convex : WedgeConvexity::Concave;
         w.bounds.min = MakeVec3(std::min(e.start.x, e.end.x),
                                  std::min(e.start.y, e.end.y),
                                  std::min(e.start.z, e.end.z));
@@ -325,8 +341,12 @@ void BuildEdgeWedgeTopology(Scene& scene, double wedgeAngleMinDeg) {
         scene.wedges.push_back(w);
     }
 
-    std::printf("[Topo] Built: %zu edges, %zu wedges (%zu faces)\n",
-                scene.edges.size(), scene.wedges.size(), scene.faces.size());
+    // 统计
+    int diffCount = 0;
+    for (auto& w : scene.wedges) if (w.diffractable) diffCount++;
+    std::printf("[Topo] Built: %zu edges, %zu wedges (%d diffractable) from %zu faces\n",
+                scene.edges.size(), scene.wedges.size(), diffCount,
+                scene.faces.size());
 }
 
 } // namespace sbr

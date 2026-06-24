@@ -169,10 +169,42 @@ static GeometricPathSet PostProcess(const GeometricPathSet& raw, const SbrConfig
 }
 
 // ═══════════════════════════════════════════════════════════
-// 独立绕射寻径 (解耦, 不混合 R/T)
-// 参考 RT.XD SolveOneTimeDiffractionPathByEquation 的设计思路
-// 对每个 Tx 和每个 Rx, 查询所有楔边, 使用 Fermat 原理找到绕射点
+// 独立绕射寻径 — RT.XD 解析Fermat + UTD 两阶段验证
 // ═══════════════════════════════════════════════════════════
+
+// RT.XD BuildGeometryPathDByAnalyticalSolution_node_line 的移植
+static bool AnalyticalFermatPoint(
+    const Point3& tx, const Point3& rx,
+    const Point3& edgeStart, const Point3& edgeEnd,
+    Point3& diffPt, double& t) {
+    Vec3 edgeDir = SubtractVec(edgeEnd, edgeStart);
+    double edgeLen2 = LengthSq(edgeDir);
+    if (edgeLen2 < 1e-12) return false;
+
+    // 投影 Tx 到边直线 → 影子点 E
+    Vec3 txVec = SubtractVec(tx, edgeStart);
+    double tTx = Dot(txVec, edgeDir) / edgeLen2;
+    Point3 E = Add(edgeStart, Scale(edgeDir, tTx));
+    double h1 = Length(SubtractVec(tx, E));
+
+    // 投影 Rx 到边直线 → 影子点 C
+    Vec3 rxVec = SubtractVec(rx, edgeStart);
+    double tRx = Dot(rxVec, edgeDir) / edgeLen2;
+    Point3 C = Add(edgeStart, Scale(edgeDir, tRx));
+    double h2 = Length(SubtractVec(rx, C));
+
+    // Fermat加权插值: diffPoint = C + (h2/(h1+h2)) × (E - C)
+    double hSum = h1 + h2;
+    if (hSum < 1e-12) { diffPt = C; t = tRx; return true; }
+
+    double k = h2 / hSum;
+    Vec3 CE = SubtractVec(E, C);
+    diffPt = Add(C, Scale(CE, k));
+
+    // 验证点在边线段上 [0, 1]
+    t = Dot(SubtractVec(diffPt, edgeStart), edgeDir) / edgeLen2;
+    return (t >= 0.0 && t <= 1.0);
+}
 
 static GeometricPathSet RunDiffraction(
     const Scene& scene, const MaterialDatabase& matDb, const SbrConfig& config,
@@ -183,89 +215,78 @@ static GeometricPathSet RunDiffraction(
     if (scene.wedges.empty()) return result;
     if (!accel) return result;
 
-    const int nSamples = std::max(4, config.diffraction_rays_per_event);
+    int diagTotal = 0, diagFermat = 0, diagVisible = 0;
 
     for (const auto& wedge : scene.wedges) {
-        if (!wedge.diffractable) continue;
-
-        // 楔边方向
-        Vec3 e = wedge.direction;
-        Point3 A = wedge.segment_start;
-        Point3 B = wedge.segment_end;
-        double L = wedge.length;
-        if (L < 1e-6) continue;
+        if (!wedge.diffractable) continue;  // 阶段1: dihedral ∈ [3°,177°], 排除共面
+        diagTotal++;
 
         for (const auto& rx : rxPoints) {
-            // ── Fermat 原理: 在边上采样找最短路径点 ──
-            double bestT = 0.5, bestLen = 1e308;
-            // 粗采样
-            for (int i = 0; i <= nSamples; ++i) {
-                double t = (double)i / nSamples;
-                Point3 P = Add(A, Scale(SubtractVec(B, A), t));
-                double s1 = Length(SubtractVec(P, txPoint));
-                double s2 = Length(SubtractVec(rx, P));
-                double total = s1 + s2;
-                if (total < bestLen) { bestLen = total; bestT = t; }
-            }
-            // 局部精化 (二分)
-            for (int refine = 0; refine < 4; ++refine) {
-                double dt = 0.5 / nSamples / (1 << refine);
-                for (int sign = -1; sign <= 1; sign += 2) {
-                    double t = bestT + sign * dt;
-                    if (t < 0.0 || t > 1.0) continue;
-                    Point3 P = Add(A, Scale(SubtractVec(B, A), t));
-                    double s1 = Length(SubtractVec(P, txPoint));
-                    double s2 = Length(SubtractVec(rx, P));
-                    double total = s1 + s2;
-                    if (total < bestLen) { bestLen = total; bestT = t; }
-                }
+            // ★ 阶段2: 大侧(183°~357°) = 自由空间, 小侧(3°~177°) = 实体侧
+            //   Tx和Rx必须都在大侧 → 即至少一面法线不指向该点(Dot<0)
+            double extAngle = wedge.wedge_angle_deg;
+            if (extAngle < 183.0 || extAngle > 357.0) continue;  // 非大侧→跳过
+            if (wedge.positive_face_id >= 0 && wedge.negative_face_id >= 0 &&
+                wedge.positive_face_id < (int)scene.faces.size() &&
+                wedge.negative_face_id < (int)scene.faces.size()) {
+                const Vec3& n0 = scene.faces[wedge.positive_face_id].normal;
+                const Vec3& n1 = scene.faces[wedge.negative_face_id].normal;
+                auto onLargeSide = [&](const Point3& p) {
+                    double d0 = Dot(SubtractVec(p, wedge.center_point), n0);
+                    double d1 = Dot(SubtractVec(p, wedge.center_point), n1);
+                    return !(d0 > 0.0 && d1 > 0.0);  // 不同时>0 → 不在小侧 → 在大侧
+                };
+                if (!onLargeSide(txPoint) || !onLargeSide(rx)) continue;
             }
 
-            Point3 diffPt = Add(A, Scale(SubtractVec(B, A), bestT));
+            // ── 解析Fermat: 闭式求解绕射点 ──
+            Point3 diffPt; double t;
+            if (!AnalyticalFermatPoint(txPoint, rx, wedge.segment_start, wedge.segment_end, diffPt, t))
+                continue;
+            diagFermat++;
+
             double s1 = Length(SubtractVec(diffPt, txPoint));
             double s2 = Length(SubtractVec(rx, diffPt));
-            if (s1 < 0.01 || s2 < 0.01) continue;  // too close
+            if (s1 < 0.01 || s2 < 0.01) continue;
 
-            // ── 可见性验证 ──
+            // ★ 唯一判据 (Kouyoumjian & Pathak 1974): 路径可见性
+            //    忽略楔边两面后, Tx→绕射点 和 绕射点→Rx 均无遮挡 → 有效绕射径
             VisibilityQueryContext vqc;
             vqc.ignored_face_id  = wedge.positive_face_id;
             vqc.ignored_face_id2 = wedge.negative_face_id;
             vqc.origin_offset_distance = 1e-3;
             vqc.target_shrink_distance  = 1e-3;
+            if (!accel->IsVisible(txPoint, diffPt, vqc)) continue;
+            if (!accel->IsVisible(diffPt, rx, vqc)) continue;
+            diagVisible++;
 
-            bool visTx = accel->IsVisible(txPoint, diffPt, vqc);
-            bool visRx = accel->IsVisible(diffPt, rx, vqc);
-            if (!visTx || !visRx) continue;
-
-            // ── 记录路径 Tx → Diff → Rx ──
-            GeometricPath gp;
-            gp.is_los = false;
-
+            // 记录路径
+            GeometricPath gp; gp.is_los = false;
             PathNode txNode; txNode.interaction_type = InteractionType::Tx;
-            txNode.point = txPoint;
-            txNode.segment_length_from_previous = 0; txNode.valid = true;
+            txNode.point = txPoint; txNode.valid = true;
             gp.nodes.push_back(txNode);
-
             PathNode diffNode; diffNode.interaction_type = InteractionType::Diffraction;
             diffNode.point = diffPt; diffNode.wedge_id = wedge.wedge_id;
             diffNode.surface_normal = wedge.direction;
             diffNode.segment_length_from_previous = s1;
             diffNode.diffraction_diag.s1 = s1;
             diffNode.diffraction_diag.s2 = s2;
+            diffNode.diffraction_diag.keller_residual =
+                std::fabs(Dot(SubtractVec(diffPt, txPoint), wedge.direction) -
+                          Dot(SubtractVec(rx, diffPt), wedge.direction)) / s1;
             diffNode.valid = true;
             gp.nodes.push_back(diffNode);
-
             PathNode rxNode; rxNode.interaction_type = InteractionType::Rx;
             rxNode.point = rx;
             rxNode.segment_length_from_previous = s2; rxNode.valid = true;
             gp.nodes.push_back(rxNode);
-
-            gp.total_length = s1 + s2;
-            gp.valid = true;
+            gp.total_length = s1 + s2; gp.valid = true;
             result.paths.push_back(gp);
         }
     }
 
+    std::printf("[Diff] candidates=%d  fermat=%d  visible=%d  paths=%zu\n",
+                diagTotal, diagFermat, diagVisible, result.paths.size());
     return result;
 }
 

@@ -9,8 +9,8 @@
     "center_frequency_hz": 2.4e9,
     "ray_count": 1000000,
     "max_ray_depth": 8,
-    "max_reflection_count": 4,
-    "max_transmission_count": 4,
+    "max_reflection_count": 0,
+    "max_transmission_count": 0,
     "max_diffraction_count": 1,
     "diffraction_rays_per_event": 8,
     "wedge_max_distance_m": 5.0,
@@ -39,7 +39,7 @@
 
   "rx_mode": "list",
   "rx_list": [
-    { "id": "rx01", "x": 5.0, "y": 1.5, "z": -10.0 },
+    { "id": "rx01", "x": 7.0, "y": 1.5, "z": -12.0 },
     { "id": "rx02", "x": 10.0, "y": 1.5, "z": -6.0 },
     { "id": "rx03", "x": 15.0, "y": 1.5, "z": -15.0 }
   ],
