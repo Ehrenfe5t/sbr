@@ -5,6 +5,12 @@
 *.pdb
 *.ilk
 *.obj
+*.iobj
+*.ipdb
+
+# VS编译输出
+x64/
+sbr/
 
 # CMake编译输出
 build/

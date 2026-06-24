@@ -45,7 +45,7 @@
   ],
 
   "output": {
-    "result_json": "output/sbr_result.json",
-    "result_csv": "output/sbr_paths.csv"
+    "result_json": "output/meeting/sbr_result.json",
+    "result_csv": "output/meeting/sbr_paths.csv"
   }
 }
